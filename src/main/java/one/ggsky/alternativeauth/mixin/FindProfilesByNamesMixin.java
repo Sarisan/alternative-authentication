@@ -21,12 +21,14 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.net.Proxy;
 import java.net.URL;
 import java.text.MessageFormat;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Mixin(YggdrasilGameProfileRepository.class)
 public class FindProfilesByNamesMixin {
@@ -38,7 +40,7 @@ public class FindProfilesByNamesMixin {
     private static final int DELAY_BETWEEN_PAGES = 100;
     private static final int DELAY_BETWEEN_FAILURES = 750;
 
-    @Inject(at = @At("HEAD"), method = "findProfilesByNames", remap = false, cancellable = true)
+    @Inject(at = @At("HEAD"), method = "findProfilesByNames([Ljava/lang/String;Lcom/mojang/authlib/ProfileLookupCallback;)V", remap = false, cancellable = true)
     public void findProfilesByNames(String[] names, ProfileLookupCallback callback, CallbackInfo ci) {
         final MinecraftClient client = MinecraftClient.unauthenticated(Proxy.NO_PROXY);
 
@@ -129,5 +131,26 @@ public class FindProfilesByNamesMixin {
 
     private static String normalizeName(final String name) {
         return name.toLowerCase(Locale.ROOT);
+    }
+
+    @Inject(at = @At("HEAD"), method = "findProfileByName(Ljava/lang/String;)Ljava/util/Optional;", remap = false, cancellable = true)
+    public void findProfileByName(final String name, CallbackInfoReturnable<Optional<NameAndId>> cir) {
+        final String normalizedName = normalizeName(name);
+        final List<NameAndId> profiles = CONFIG.getProviders().stream()
+            .flatMap(provider -> {
+                final URL url = HttpAuthenticationService.constantURL(provider.getProfilesUrl());
+                final MinecraftClient client = MinecraftClient.unauthenticated(Proxy.NO_PROXY);
+                final ProfileSearchResultsResponse response = client.post(url, List.of(normalizedName), ProfileSearchResultsResponse.class);
+                return response != null ? response.profiles().stream() : Stream.empty();
+            })
+            .toList();
+
+        if (profiles.isEmpty()) {
+            LOGGER.debug(MessageFormat.format("Could not find profile {0} from any providers", name));
+            cir.cancel();
+        } else {
+            LOGGER.debug(MessageFormat.format("Successfully looked up profile {0}", name));
+            cir.setReturnValue(Optional.of(profiles.get(0)));
+        }
     }
 }
